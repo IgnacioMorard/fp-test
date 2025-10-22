@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Fingerprint Debugger — Learning Tool</title>
+<style>
+  :root{font-family:system-ui,Segoe UI,Roboto,Arial,Helvetica;margin:0;color:#111;background:#fff}
+  header{padding:20px;border-bottom:1px solid #eee;background:#fafafa}
+  main{padding:20px;max-width:1100px;margin:0 auto}
+  h1{margin:0 0 8px;font-size:20px}
+  .row{display:flex;gap:20px;align-items:flex-start}
+  .col{flex:1;min-width:240px}
+  pre{background:#f6f7f9;padding:12px;border-radius:8px;overflow:auto}
+  table{width:100%;border-collapse:collapse}
+  th,td{padding:8px;border-bottom:1px solid #eee;text-align:left;font-size:13px}
+  th{width:240px;background:#fafafa}
+  .controls{display:flex;gap:10px;margin-bottom:12px}
+  button{padding:8px 12px;border-radius:8px;border:1px solid #ccc;background:white;cursor:pointer}
+  .small{font-size:13px;color:#555}
+  .signal-key{font-weight:600}
+  .hint{font-size:12px;color:#666}
+  footer{padding:20px;border-top:1px solid #eee;margin-top:20px;color:#666;font-size:13px}
+  .tag{display:inline-block;padding:6px 8px;border-radius:999px;border:1px solid #ddd;background:#fff;font-size:12px}
+  .good{color:green}.warn{color:orange}.bad{color:red}
+  details{margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <h1>JS Fingerprint Debugger — Learning tool</h1>
+  <div class="small">Collects many browser signals and shows raw values + explanations. <strong>No network requests.</strong></div>
+</header>
+
+<main>
+  <div class="controls">
+    <button id="collectBtn">Collect fingerprint</button>
+    <button id="exportBtn">Download JSON</button>
+    <button id="clearBtn">Clear stored fingerprint</button>
+    <div style="margin-left:auto" class="small">Stored locally: <span id="storedStatus">—</span></div>
+  </div>
+
+  <section class="row">
+    <div class="col">
+      <h3>Fingerprint (SHA-256)</h3>
+      <pre id="fp">—</pre>
+
+      <h3>Canonical string used for hashing</h3>
+      <pre id="canonical" style="max-height:160px"></pre>
+
+      <h3>Raw signals</h3>
+      <pre id="raw" style="max-height:400px"></pre>
+    </div>
+
+    <div class="col">
+      <h3>Signal table — values & meaning</h3>
+      <div style="overflow:auto;max-height:680px">
+        <table id="signalTable">
+          <thead><tr><th>Signal</th><th>Value</th><th>What it tells you</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <details><summary class="small">About this demo</summary>
+        <div class="small" style="padding:8px">
+          This page collects typical fingerprinting signals for study: browser navigator fields, screen/resolution, Intl/timezone, storage availability, plugin lists, codec support, canvas & WebGL render outputs, audio processing output fingerprint, a simple font-presence probe (checks common fonts by measuring text width), and more.
+          <br><br>
+          <strong>Privacy:</strong> no data is sent anywhere. If you want to POST results to a server for cross-device tests you must add a server endpoint (CORS + secure tokens) — do that only with consent.
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <section style="margin-top:18px">
+    <h3>Reliability / stability hints</h3>
+    <ul>
+      <li><span class="tag">Stable-ish</span> — timezone, language, deviceMemory (may change when OS/browser updates)</li>
+      <li><span class="tag">Variable</span> — canvas/WebGL (can change with GPU driver or browser updates), fonts (user installs/uninstalls), audio fingerprint (drivers/stack changes)</li>
+      <li><span class="tag">High entropy</span> — combination of many low-entropy signals makes the fingerprint unique</li>
+    </ul>
+  </section>
+</main>
+
+<footer>
+  <div>Ethics & legal: only use for experiment/learning with devices you control or with explicit consent. In many jurisdictions fingerprinting is treated as personal data.</div>
+</footer>
+
+<script>
+/*
+  Fingerprint Debugger
+  - Collects many signals and displays them with explanations.
+  - Uses SHA-256 via SubtleCrypto for fingerprint.
+  - No network requests by default.
+*/
+
+// ---------- Utilities ----------
+async function sha256Hex(s){
+  const enc = new TextEncoder().encode(s);
+  const h = await crypto.subtle.digest('SHA-256', enc);
+  return Array.from(new Uint8Array(h)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+function safeStr(x){
+  try{ if (x === null) return 'null'; if (x === undefined) return 'undefined'; return typeof x === 'object' ? JSON.stringify(x) : String(x); }
+  catch(e){ return 'err'; }
+}
+function setText(id, v){ document.getElementById(id).textContent = v; }
+
+// ---------- Signal collectors ----------
+async function collectNavigatorSignals(){
+  const nav = navigator;
+  return {
+    userAgent: nav.userAgent || '',
+    appVersion: nav.appVersion || '',
+    platform: nav.platform || '',
+    languages: (nav.languages || []).slice(0,10),
+    language: nav.language || '',
+    hardwareConcurrency: nav.hardwareConcurrency || null,
+    deviceMemory: nav.deviceMemory || null,
+    cookieEnabled: !!nav.cookieEnabled,
+    doNotTrack: nav.doNotTrack || null,
+    online: nav.onLine || navigator.onLine || null
+  };
+}
+
+function collectScreenSignals(){
+  return {
+    screenWidth: screen.width,
+    screenHeight: screen.height,
+    availWidth: screen.availWidth,
+    availHeight: screen.availHeight,
+    colorDepth: screen.colorDepth,
+    pixelRatio: window.devicePixelRatio || 1
+  };
+}
+
+function collectIntlSignals(){
+  let tz = 'unknown';
+  try{ tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'unknown'; } catch(e){ tz = 'err'; }
+  return {
+    timezone: tz,
+    locale: Intl.NumberFormat().resolvedOptions().locale || Intl.DateTimeFormat().resolvedOptions().locale || '',
+    dateTimeFormat: Intl.DateTimeFormat().format(new Date(2000,0,2,3,4,5))
+  };
+}
+
+function collectStorageSignals(){
+  return {
+    localStorage: (()=>{ try{ return typeof localStorage !== 'undefined'; } catch(e){ return false; } })(),
+    sessionStorage: (()=>{ try{ return typeof sessionStorage !== 'undefined'; } catch(e){ return false; } })(),
+    indexedDB: (()=>{ try{ return typeof indexedDB !== 'undefined'; } catch(e){ return false; } })()
+  };
+}
+
+function collectPlugins(){
+  try{
+    const p = navigator.plugins;
+    if (!p) return {plugins: []};
+    const arr = Array.from(p).slice(0,50).map(x => ({name: x.name, description: x.description, filename: x.filename}));
+    return {plugins: arr};
+  } catch(e){ return {plugins: []}; }
+}
+
+function collectMediaSupport(){
+  try{
+    const aud = document.createElement('audio');
+    const vid = document.createElement('video');
+    return {
+      canPlay: {
+        mp3: aud.canPlayType ? aud.canPlayType('audio/mpeg') : '',
+        wav: aud.canPlayType ? aud.canPlayType('audio/wav; codecs="1"') : '',
+        h264: vid.canPlayType ? vid.canPlayType('video/mp4; codecs="avc1.42E01E"') : '',
+        webm: vid.canPlayType ? vid.canPlayType('video/webm; codecs="vp8, vorbis"') : ''
+      }
+    };
+  } catch(e){ return {canPlay:{}}; }
+}
+
+// Canvas fingerprint: draw text and a few shapes, return dataURL
+function canvasFingerprint(){
+  try{
+    const c = document.createElement('canvas');
+    c.width = 240; c.height = 80;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#f9f2';
+    ctx.fillRect(0,0,c.width,c.height);
+    ctx.textBaseline = 'alphabetic';
+    ctx.font = "18px 'Arial'";
+    ctx.fillStyle = '#060';
+    ctx.fillText('FP test — 0123456789 ☺', 10, 30);
+    ctx.fillStyle = '#f00';
+    ctx.fillRect(10,40,120,8);
+    return c.toDataURL();
+  } catch(e){ return 'canvas-error-'+String(e); }
+}
+
+// WebGL renderer & a small render hash
+function webglFingerprint(){
+  try{
+    const canvas = document.createElement('canvas');
+    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+    if (!gl) return {supported:false};
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    const vendor = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : 'unknown';
+    const renderer = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'unknown';
+    // Render a small triangle and read pixels (this is heavier; we return renderer/vendor only)
+    return {supported:true, vendor, renderer};
+  } catch(e){ return {supported:false, err:String(e)}; }
+}
+
+// Audio fingerprint: uses OfflineAudioContext to process a small graph and get a numeric checksum
+async function audioFingerprint(){
+  try{
+    const AudioCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!AudioCtx) return {supported:false};
+    const ctx = new AudioCtx(1, 44100, 44100);
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.value = 10000;
+    gain.gain.value = 0.0001;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(0);
+    const render = await ctx.startRendering();
+    // Sum some samples to get a tiny fingerprint metric
+    const channel = render.getChannelData(0);
+    let sum = 0;
+    for (let i=0;i<Math.min(1000, channel.length); i+=10) sum += Math.abs(channel[i]);
+    return {supported:true, metric: sum.toFixed(6)};
+  } catch(e){ return {supported:false, err:String(e)}; }
+}
+
+// Font presence detection: measure widths against fallback to detect a font among a probe list
+function detectFonts(probeFonts){
+  const base = 'monospace';
+  const testStr = "mmmmmmmmmmlli"; // chars that reveal width differences
+  const span = document.createElement('span');
+  span.style.visibility = 'hidden';
+  span.style.fontSize = '16px';
+  span.textContent = testStr;
+  document.body.appendChild(span);
+
+  function widthFor(family){
+    span.style.fontFamily = family + ',' + base;
+    return span.getBoundingClientRect().width;
+  }
+  const widths = {};
+  const baseWidth = widthFor(base);
+  probeFonts.forEach(f => {
+    widths[f] = widthFor(`'${f}'`);
+  });
+  document.body.removeChild(span);
+  const present = {};
+  for (const f of probeFonts) present[f] = (widths[f] !== baseWidth);
+  return present;
+}
+
+// Small helper to build canonical string
+function canonicalizeSignals(obj){
+  // Flatten object in stable key order
+  const all = [];
+  const keys = Object.keys(obj).sort();
+  for (const k of keys){
+    const v = obj[k];
+    if (typeof v === 'object') all.push(`${k}=${JSON.stringify(v)}`);
+    else all.push(`${k}=${String(v)}`);
+  }
+  return all.join('||');
+}
+
+// ---------- Main collection flow ----------
+async function collectAll(){
+  setText('fp','computing...');
+  setText('canonical','computing...');
+  setText('raw','computing...');
+
+  // Basic groups
+  const nav = await collectNavigatorSignals();
+  const screenSig = collectScreenSignals();
+  const intl = collectIntlSignals();
+  const store = collectStorageSignals();
+  const plugs = collectPlugins();
+  const media = collectMediaSupport();
+  const canvas = canvasFingerprint();
+  const webgl = webglFingerprint();
+  const audio = await audioFingerprint();
+
+  // fonts to probe (common ones)
+  const fontList = [
+    'Arial','Helvetica','Times New Roman','Courier New','Verdana','Georgia','Trebuchet MS','Comic Sans MS','Impact','Roboto','Noto Sans','Segoe UI'
+  ];
+  const fonts = (typeof document !== 'undefined') ? detectFonts(fontList) : {};
+
+  const timestamp = (new Date()).toISOString();
+
+  const signals = Object.assign({}, nav, screenSig, intl, store, media, {canvasHash: canvas.slice(0,200)}, webgl, audio, {fontsPresent: fonts, plugins: plugs.plugins, collectedAt: timestamp});
+
+  const canonical = canonicalizeSignals(signals);
+  const fp = await sha256Hex(canonical);
+
+  // Display
+  setText('canonical', canonical.slice(0,5000)); // truncate display if huge
+  setText('fp', fp);
+  setText('raw', JSON.stringify(signals, null, 2));
+
+  // fill table with descriptions
+  const tbody = document.querySelector('#signalTable tbody');
+  tbody.innerHTML = '';
+
+  const desc = {
+    userAgent: ['navigator.userAgent','Browser + some OS info. Often changed on updates.'],
+    platform: ['navigator.platform','OS platform (e.g., "Win32", "Linux x86_64").'],
+    languages: ['navigator.languages','Preferred languages; may hint locale.'],
+    language: ['navigator.language','Primary language setting.'],
+    hardwareConcurrency: ['navigator.hardwareConcurrency','Number of logical CPU cores (approx).'],
+    deviceMemory: ['navigator.deviceMemory','Approx. RAM in GB (rounded).'],
+    cookieEnabled: ['navigator.cookieEnabled','Whether cookies are enabled.'],
+    doNotTrack: ['navigator.doNotTrack','User DNT preference (may be null).'],
+    online: ['navigator.onLine','Whether browser thinks it has network connectivity.'],
+    screenWidth: ['screen.width','Screen pixel width.'],
+    screenHeight: ['screen.height','Screen pixel height.'],
+    colorDepth: ['screen.colorDepth','Color depth in bits.'],
+    pixelRatio: ['window.devicePixelRatio','Device pixel ratio (HiDPI).'],
+    timezone: ['Intl timezone','IANA timezone string (e.g., America/Argentina/Buenos_Aires).'],
+    locale: ['Locale','Locale used by Number/Date formatting.'],
+    dateTimeFormat: ['Date format sample','Shows how locale formats date/time.'],
+    localStorage: ['localStorage availability','Whether localStorage is accessible.'],
+    sessionStorage: ['sessionStorage availability','Whether sessionStorage is accessible.'],
+    indexedDB: ['indexedDB availability','Whether IndexedDB API exists.'],
+    plugins: ['navigator.plugins','List of browser plugins (deprecated / limited in modern browsers).'],
+    canPlay: ['Media codec support','Results from canPlayType for common codecs.'],
+    canvasHash: ['Canvas dataURL (truncated)','Canvas rendering output (high entropy — influenced by GPU/driver/browser).'],
+    vendor: ['WebGL vendor (if available)','Unmasked GPU vendor string (via WEBGL_debug_renderer_info)'],
+    renderer: ['WebGL renderer','Unmasked GPU renderer string.'],
+    supported: ['WebGL supported','Whether WebGL context was created.'],
+    metric: ['Audio fingerprint metric','A tiny numeric summary from offline audio rendering.'],
+    fontsPresent: ['Font presence probe','Boolean per probed font whether its metrics differ from fallback (indicates installation).'],
+    collectedAt: ['Timestamp','When data was collected']
+  };
+
+  // add dynamic rows for top-level signals
+  for (const k of Object.keys(signals)){
+    const row = document.createElement('tr');
+    const keyCell = document.createElement('td');
+    keyCell.innerHTML = `<span class="signal-key">${k}</span><div class="hint">${desc[k] ? desc[k][0] : ''}</div>`;
+    const valCell = document.createElement('td');
+    valCell.textContent = typeof signals[k] === 'object' ? JSON.stringify(signals[k]) : String(signals[k]);
+    const meaningCell = document.createElement('td');
+    meaningCell.innerHTML = (desc[k] ? desc[k][1] : 'See raw value — may be lower-level / composite.') + '<br><div class="small">Reliability: ' + reliabilityHint(k) + '</div>';
+    row.appendChild(keyCell);
+    row.appendChild(valCell);
+    row.appendChild(meaningCell);
+    tbody.appendChild(row);
+  }
+
+  // store locally for cross-visit comparison
+  localStorage.setItem('fp-demo', JSON.stringify({fingerprint: fp, signals, canonical, collectedAt: timestamp}));
+
+  // update stored status
+  updateStoredStatus();
+  return {fp, signals};
+}
+
+function reliabilityHint(k){
+  const unstable = ['canvasHash','vendor','renderer','metric','fontsPresent'];
+  const stable = ['timezone','language','languages','screenWidth','screenHeight'];
+  if (unstable.includes(k)) return '<span class="warn">Variable</span> — can change with drivers/updates';
+  if (stable.includes(k)) return '<span class="good">Stable-ish</span> — tends to persist';
+  return '<span class="small">Medium</span>';
+}
+
+function updateStoredStatus(){
+  const s = localStorage.getItem('fp-demo');
+  if (!s) return setText('storedStatus','no');
+  try{
+    const p = JSON.parse(s);
+    setText('storedStatus', `yes — ${p.fingerprint.slice(0,12)}... @ ${p.collectedAt}`);
+  }catch(e){ setText('storedStatus','yes (unreadable)'); }
+}
+
+// ---------- UI wiring ----------
+document.getElementById('collectBtn').addEventListener('click', async ()=>{
+  try{
+    document.getElementById('collectBtn').disabled = true;
+    await collectAll();
+  }catch(e){
+    console.error(e);
+  } finally { document.getElementById('collectBtn').disabled = false; }
+});
+
+document.getElementById('clearBtn').addEventListener('click', ()=>{
+  localStorage.removeItem('fp-demo');
+  setText('fp','—');
+  setText('canonical','—');
+  setText('raw','—');
+  const tbody = document.querySelector('#signalTable tbody');
+  tbody.innerHTML = '';
+  updateStoredStatus();
+});
+
+document.getElementById('exportBtn').addEventListener('click', ()=>{
+  const s = localStorage.getItem('fp-demo');
+  if (!s) return alert('No stored fingerprint to export. Collect first.');
+  const blob = new Blob([s], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'fp-demo.json'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+});
+
+// auto update status on load
+updateStoredStatus();
+// auto-collect once after load (optional). Comment out if you prefer manual only.
+window.addEventListener('load', ()=>{ setTimeout(()=>{ document.getElementById('collectBtn').click(); }, 250); });
+
+</script>
